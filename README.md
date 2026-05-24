@@ -1,27 +1,30 @@
 # Auth-Taller: JWT y Refresh Tokens
 
-Taller práctico para aprender autenticación segura con **JSON Web Tokens (JWT)** y **refresh tokens** usando Node.js, Express y MongoDB.
+Implementación del taller de autenticación con **JSON Web Tokens (JWT)** y **refresh tokens**, desarrollado con Node.js, Express y MongoDB Atlas.
 
-Basado en el artículo de [FreeCodeCamp](https://www.freecodecamp.org/news/how-to-build-a-secure-authentication-system-with-jwt-and-refresh-tokens/).
-
----
-
-## Qué aprenderás
-
-- Crear y verificar **access tokens** JWT de corta duración
-- Mantener sesiones con **refresh tokens** de larga duración
-- **Rotar** refresh tokens para bloquear reutilización de tokens robados
-- Proteger rutas con middleware de autenticación
-- Almacenar refresh tokens de forma segura (hash + cookie httpOnly)
+Referencia: [How to Build a Secure Authentication System with JWT and Refresh Tokens](https://www.freecodecamp.org/news/how-to-build-a-secure-authentication-system-with-jwt-and-refresh-tokens/) — Joan Ayebola, FreeCodeCamp.
 
 ---
 
-## Requisitos previos
+## Descripción
 
-- [Node.js](https://nodejs.org/) (v18 o superior recomendado)
+Este proyecto es una API REST que implementa un flujo de autenticación completo:
+
+- Registro e inicio de sesión con contraseñas hasheadas (bcrypt)
+- Emisión de **access tokens** JWT de corta duración (15 min)
+- Emisión de **refresh tokens** de larga duración (7 días) en cookie httpOnly
+- Rotación de refresh tokens en cada renovación
+- Protección de rutas mediante middleware
+- Revocación de sesión en logout
+
+---
+
+## Requisitos
+
+- [Node.js](https://nodejs.org/) v18+
 - npm
-- Cuenta en [MongoDB Atlas](https://www.mongodb.com/atlas) (gratuita)
-- [Postman](https://www.postman.com/) o Insomnia para probar la API
+- Cuenta en [MongoDB Atlas](https://www.mongodb.com/atlas)
+- [Postman](https://www.postman.com/) o Insomnia
 
 ---
 
@@ -33,31 +36,31 @@ cd Auth-Taller
 npm install
 ```
 
-Copia el archivo de entorno y completa tus credenciales:
+Copiar el archivo de entorno y completar las variables:
 
 ```bash
 cp .env.example .env
 ```
 
----
-
-## Variables de entorno
+### Variables de entorno
 
 | Variable | Descripción |
 |----------|-------------|
-| `PORT` | Puerto del servidor (por defecto `5000`) |
-| `MONGO_URI` | Cadena de conexión a MongoDB Atlas |
+| `PORT` | Puerto del servidor (default: `5000`) |
+| `MONGO_URI` | URI de conexión a MongoDB Atlas |
 | `JWT_SECRET` | Secreto para firmar access tokens |
 | `REFRESH_TOKEN_SECRET` | Secreto distinto para refresh tokens |
 | `NODE_ENV` | `development` o `production` |
 
-Genera secretos seguros con:
+Generar secretos:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-> **Importante:** nunca subas el archivo `.env` al repositorio. Usa secretos **diferentes** para `JWT_SECRET` y `REFRESH_TOKEN_SECRET`.
+En MongoDB Atlas, habilitar **Network Access** con la IP del equipo (o `0.0.0.0/0` solo para desarrollo).
+
+> El archivo `.env` no se sube al repositorio. Usar secretos **distintos** para `JWT_SECRET` y `REFRESH_TOKEN_SECRET`.
 
 ---
 
@@ -71,28 +74,87 @@ npm run dev
 npm start
 ```
 
-Abre `http://localhost:5000` — deberías ver: `JWT Auth API running`
+Verificar en `http://localhost:5000` — respuesta esperada: `JWT Auth API running`
+
+Consola esperada:
+
+```
+Server running on port 5000
+MongoDB connected
+```
 
 ---
 
-## Conceptos clave
+## Cómo funciona
+
+### Flujo general
+
+```mermaid
+sequenceDiagram
+    participant Cliente
+    participant API
+    participant MongoDB
+
+    Cliente->>API: POST /api/auth/register
+    API->>MongoDB: Guardar usuario (password hasheado)
+
+    Cliente->>API: POST /api/auth/login
+    API->>MongoDB: Verificar credenciales
+    API-->>Cliente: accessToken (JSON)
+    API-->>Cliente: refresh_token (cookie httpOnly)
+
+    Cliente->>API: GET /api/profile/me + Bearer token
+    API-->>Cliente: Datos del usuario
+
+    Cliente->>API: POST /api/auth/refresh (cookie automática)
+    API->>MongoDB: Revocar refresh anterior, guardar nuevo
+    API-->>Cliente: Nuevo accessToken + nueva cookie
+
+    Cliente->>API: POST /api/auth/logout
+    API->>MongoDB: Revocar refresh token
+    API-->>Cliente: Cookie eliminada
+```
 
 ### Access token vs refresh token
 
 | | Access token | Refresh token |
 |---|-------------|---------------|
-| **Duración** | 15 minutos | 7 días |
-| **Uso** | Cada petición protegida | Solo para obtener un nuevo access token |
-| **Almacenamiento** | Memoria del cliente (header `Authorization`) | Cookie httpOnly en el servidor |
-| **Secreto** | `JWT_SECRET` | `REFRESH_TOKEN_SECRET` |
+| Duración | 15 minutos | 7 días |
+| Uso | Cada petición protegida | Solo para renovar el access token |
+| Transporte | Header `Authorization: Bearer ...` | Cookie httpOnly (`path: /api/auth/refresh`) |
+| Secreto | `JWT_SECRET` | `REFRESH_TOKEN_SECRET` |
+| Almacenamiento en BD | No (stateless) | Sí, como hash SHA-256 |
+
+### Componentes principales
+
+| Archivo | Responsabilidad |
+|---------|-----------------|
+| `routes/auth.js` | Register, login, refresh y logout |
+| `routes/profile.js` | Ruta protegida de ejemplo (`GET /me`) |
+| `middleware/auth.js` | Verifica el access token en cada petición protegida |
+| `utils/tokens.js` | Creación, persistencia y rotación de tokens |
+| `models/user.js` | Esquema de usuario |
+| `models/refreshToken.js` | Registro de refresh tokens con estado de revocación |
+| `config/db.js` | Conexión a MongoDB Atlas |
 
 ### Rotación de refresh tokens
 
-Cada vez que llamas a `/api/auth/refresh`, el token anterior se **revoca** y se emite uno nuevo. Si un atacante roba un refresh token ya usado, no podrá reutilizarlo.
+Al llamar a `/api/auth/refresh`:
 
-### Hash en base de datos
+1. Se valida la cookie y el registro en base de datos
+2. Se marca el token anterior como revocado (`revokedAt`)
+3. Se genera un nuevo par access + refresh con un `jti` distinto
+4. Se guarda el hash del nuevo refresh token
 
-Los refresh tokens nunca se guardan en texto plano. Se almacena un hash SHA-256, de modo que una filtración de la base de datos no expone tokens válidos.
+Si alguien intenta reutilizar un refresh token ya rotado, la API responde con `401`.
+
+### Seguridad aplicada
+
+- Contraseñas hasheadas con bcrypt (cost factor 10)
+- Secretos separados para access y refresh tokens
+- Refresh tokens hasheados antes de guardarse en MongoDB
+- Cookie httpOnly con `sameSite: 'strict'` y `secure` en producción
+- Access tokens de corta duración para limitar el riesgo si se filtran
 
 ---
 
@@ -100,32 +162,26 @@ Los refresh tokens nunca se guardan en texto plano. Se almacena un hash SHA-256,
 
 ```
 Auth-Taller/
-├── server.js              # Punto de entrada de Express
-├── config/
-│   └── db.js              # Conexión a MongoDB
+├── server.js
+├── config/db.js
 ├── models/
-│   ├── user.js            # Modelo de usuario
-│   └── refreshToken.js    # Modelo de refresh token
-├── middleware/
-│   └── auth.js            # Verificación del access token
+│   ├── user.js
+│   └── refreshToken.js
+├── middleware/auth.js
 ├── routes/
-│   ├── auth.js            # Registro, login, refresh, logout
-│   └── profile.js         # Ruta protegida de perfil
-└── utils/
-    └── tokens.js          # Helpers para crear y rotar tokens
+│   ├── auth.js
+│   └── profile.js
+└── utils/tokens.js
 ```
 
 ---
 
-## Referencia de API
+## Endpoints
 
 Base URL: `http://localhost:5000`
 
 ### POST `/api/auth/register`
 
-Registra un nuevo usuario.
-
-**Body (JSON):**
 ```json
 {
   "username": "demoUser",
@@ -134,17 +190,13 @@ Registra un nuevo usuario.
 }
 ```
 
-**Respuestas:**
-- `201` — `{ "message": "User created successfully" }`
-- `400` — `{ "message": "User already exists" }`
-
----
+| Status | Respuesta |
+|--------|-----------|
+| `201` | `{ "message": "User created successfully" }` |
+| `400` | `{ "message": "User already exists" }` |
 
 ### POST `/api/auth/login`
 
-Inicia sesión y devuelve un access token. El refresh token se envía como cookie httpOnly.
-
-**Body (JSON):**
 ```json
 {
   "email": "demo@email.com",
@@ -152,157 +204,48 @@ Inicia sesión y devuelve un access token. El refresh token se envía como cooki
 }
 ```
 
-**Respuesta `200`:**
-```json
-{
-  "accessToken": "eyJhbGciOiJIUzI1NiIs..."
-}
-```
-
-**Cookie:** `refresh_token` (httpOnly, path `/api/auth/refresh`)
-
----
+| Status | Respuesta |
+|--------|-----------|
+| `200` | `{ "accessToken": "..." }` + cookie `refresh_token` |
 
 ### POST `/api/auth/refresh`
 
-Obtiene un nuevo access token usando la cookie de refresh. Rota el refresh token automáticamente.
+Sin headers. Postman envía la cookie automáticamente.
 
-**Headers:** ninguno requerido (la cookie se envía sola)
-
-**Respuesta `200`:**
-```json
-{
-  "accessToken": "eyJhbGciOiJIUzI1NiIs..."
-}
-```
-
-**Errores comunes:**
-- `401` — `"No refresh token"`
-- `401` — `"Invalid or expired refresh token"`
-- `401` — `"Refresh token revoked"`
-
----
+| Status | Respuesta |
+|--------|-----------|
+| `200` | `{ "accessToken": "..." }` + nueva cookie |
+| `401` | Token ausente, inválido, expirado o revocado |
 
 ### POST `/api/auth/logout`
 
-Revoca el refresh token actual y elimina la cookie.
-
-**Respuesta `200`:**
-```json
-{
-  "message": "Logged out"
-}
-```
-
----
+| Status | Respuesta |
+|--------|-----------|
+| `200` | `{ "message": "Logged out" }` |
 
 ### GET `/api/profile/me`
 
-Devuelve el perfil del usuario autenticado.
+Header requerido: `Authorization: Bearer <accessToken>`
 
-**Headers:**
-```
-Authorization: Bearer <accessToken>
-```
-
-**Respuesta `200`:**
-```json
-{
-  "user": {
-    "_id": "...",
-    "username": "demoUser",
-    "email": "demo@email.com"
-  }
-}
-```
-
-**Errores:**
-- `401` — `"Missing or invalid Authorization header"`
-- `401` — `"Access token expired"`
-- `401` — `"Invalid token"`
-- `404` — `"User not found"`
+| Status | Respuesta |
+|--------|-----------|
+| `200` | `{ "user": { "_id", "username", "email" } }` |
+| `401` | Token ausente, inválido o expirado |
+| `404` | `{ "message": "User not found" }` |
 
 ---
 
-## Guía de pruebas con Postman
+## Demostración con Postman
 
-### 1. Registrar un usuario
-
-- **Método:** POST
-- **URL:** `http://localhost:5000/api/auth/register`
-- **Body:** raw JSON con `username`, `email` y `password`
-- **Resultado esperado:** status `201`
-
-### 2. Iniciar sesión
-
-- **Método:** POST
-- **URL:** `http://localhost:5000/api/auth/login`
-- **Body:** `{ "email": "...", "password": "..." }`
-- Copia el valor de `accessToken` de la respuesta
-- Postman guardará la cookie `refresh_token` automáticamente
-
-### 3. Acceder a ruta protegida
-
-- **Método:** GET
-- **URL:** `http://localhost:5000/api/profile/me`
-- **Headers:** `Authorization: Bearer <accessToken>`
-- **Resultado esperado:** datos del usuario sin el campo `password`
-
-### 4. Probar errores de autenticación
-
-| Prueba | Resultado esperado |
-|--------|-------------------|
-| Sin header `Authorization` | `401` — Missing or invalid Authorization header |
-| Token inventado | `401` — Invalid token |
-| Token expirado (esperar 15 min o cambiar TTL) | `401` — Access token expired |
-
-### 5. Renovar el access token
-
-- **Método:** POST
-- **URL:** `http://localhost:5000/api/auth/refresh`
-- No necesitas headers; Postman envía la cookie guardada en el paso 2
-- **Resultado esperado:** nuevo `accessToken` en la respuesta
-
-### 6. Cerrar sesión
-
-- **Método:** POST
-- **URL:** `http://localhost:5000/api/auth/logout`
-- **Resultado esperado:** `{ "message": "Logged out" }`
-- Intentar `/refresh` de nuevo debe devolver `401`
-
----
-
-## Flujo del cliente (referencia)
-
-```
-Login → guardar accessToken en memoria
-      → refresh_token queda en cookie httpOnly
-
-Petición protegida → Authorization: Bearer <accessToken>
-
-Si 401 "Access token expired":
-  → POST /api/auth/refresh (cookie automática)
-  → actualizar accessToken en memoria
-  → reintentar petición original
-
-Logout → POST /api/auth/logout → limpiar estado local
-```
-
-> No guardes el access token en `localStorage` — es vulnerable a XSS. Mantenlo en memoria.
-
----
-
-## Notas de seguridad
-
-- Usa **HTTPS** en producción (`secure: true` en cookies se activa con `NODE_ENV=production`)
-- Mantén access tokens **cortos** (15 min) y refresh tokens **moderados** (7 días)
-- **Rota** el refresh token en cada renovación
-- **Hashea** refresh tokens antes de guardarlos en la base de datos
-- Considera **rate limiting** en `/api/auth/refresh` en producción
-- Rota tus secretos y contraseñas si alguna vez se exponen
+1. **Register** — `POST /api/auth/register` con username, email y password → `201`
+2. **Login** — `POST /api/auth/login` → copiar `accessToken`; Postman guarda la cookie
+3. **Perfil** — `GET /api/profile/me` con header `Authorization: Bearer <token>` → datos del usuario
+4. **Token inválido** — repetir sin header o con token inventado → `401`
+5. **Refresh** — `POST /api/auth/refresh` → nuevo `accessToken`
+6. **Logout** — `POST /api/auth/logout` → intentar refresh de nuevo → `401`
 
 ---
 
 ## Referencia
 
-- Artículo original: [How to Build a Secure Authentication System with JWT and Refresh Tokens](https://www.freecodecamp.org/news/how-to-build-a-secure-authentication-system-with-jwt-and-refresh-tokens/) — Joan Ayebola, FreeCodeCamp
+- Artículo base: [How to Build a Secure Authentication System with JWT and Refresh Tokens](https://www.freecodecamp.org/news/how-to-build-a-secure-authentication-system-with-jwt-and-refresh-tokens/)
